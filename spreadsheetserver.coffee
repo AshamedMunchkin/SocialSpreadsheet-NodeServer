@@ -1,109 +1,406 @@
+async = require 'async'
+net = require 'net'
+SpreadsheetDatabase = require './spreadsheetdatabase'
+Connection = require './connection'
+
 class SpreadsheetServer
   constructor: (port) ->
-    net = require 'net'
-    #SpreadsheetDatabase = require './spreadsheetdatabase.js'
+    @editSessions = []
+    @spreadsheetDatabase = new SpreadsheetDatabase()
 
-    #@spreadsheetDatabase = new SpreadsheetDatabase()
-
-    server = net.createServer() #@handleAccept
+    server = net.createServer (socket) => new Connection(socket, @).start()
     server.listen port
+    console.log 'Spreadsheet Server running'
 
   create: (connection, filename, password) ->
-    if @spreadsheetDatabase.doesSpreadsheetExist(filename) is yes
-      connection.write """
-                       CREATE FAIL
-                       Name:#{filename}
-                       The spreadsheet already exists.
+    async.auto(
+      getSpreadsheetId: [
+        (callback) =>
+          @spreadsheetDatabase.getSpreadsheetId filename, (id) ->
+            if id isnt 0
+              error =
+                code: 'FAIL'
+                message: 'The spreadsheet already exists.'
+            callback error
+      ]
 
-                       """
-      return
+      createSpreadsheet: [
+        'getSpreadsheetId'
+        (callback) =>
+          @spreadsheetDatabase.createSpreadsheet filename, password, ->
+            callback()
+      ]
 
-    @spreadsheetDatabase.createSpreadsheet filename, password
-    connection.write """
-                     CREATE OK
-                     Name:#{filename}
-                     Password:#{password}
+      createOk: [
+        'createSpreadsheet'
+        (callback) ->
+          connection.sendMessage(
+            """
+            CREATE OK
+            Name:#{filename}
+            Password:#{password}
 
-                     """
+            """
+          )
+          callback()
+      ]
+
+      (error) ->
+        switch
+          when not error? then return
+          else
+            connection.sendMessage(
+              """
+              CREATE FAIL
+              Name:#{filename}
+              #{error.message}
+
+              """
+            )
+    )
 
   join: (connection, filename, password) ->
-    if @spreadsheetDatabase.doesSpreadsheetExist(filename) is no
-      connection.write """
-                       JOIN FAIL
-                       Name:#{filename}
-                       Spreadsheet does not exist.
+    async.auto(
+      getSpreadsheetId: [
+        (callback) =>
+          @spreadsheetDatabase.getSpreadsheetId filename, (id) ->
+            if id is 0
+              error =
+                code: 'FAIL'
+                message: 'Spreadsheet does not exist.'
+            callback error, id
+      ]
 
-                       """
-      return
+      isPasswordCorrect: [
+        'getSpreadsheetId'
+        (callback, results) =>
+          @spreadsheetDatabase.getSpreadsheetPassword(
+            results.getSpreadsheetId, (spreadsheetPassword) ->
+              correct = password is spreadsheetPassword
+              if not correct
+                error =
+                  code: 'FAIL'
+                  message: 'Incorrect password.'
+              callback error
+          )
+      ]
 
-    if password isnt @spreadsheetDatabase.getSpreadsheetPassword filename
-      connection.write """
-                       JOIN FAIL
-                       Name:#{filename}
-                       Incorrect password.
+      getSpreadsheetXml: [
+        'isPasswordCorrect'
+        (callback, results) =>
+          @spreadsheetDatabase.getSpreadsheetXml(
+            results.getSpreadsheetId, (xml) -> callback null, xml
+          )
+      ]
 
-                       """
-      return
+      createEditSession: [
+        'isPasswordCorrect'
+        (callback) =>
+          @editSessions[filename] ?=
+            version: 1
+            dones: []
+            clients: []
+          callback()
+      ]
 
-    xml = @spreadsheetDatabase.getSpreadsheetXml filename
-    version = @getVersion filename
-    connection.write """
-                     JOIN OK
-                     Name:#{filename}
-                     Version:#{version}
-                     Length:#{xml.length}
-                     #{xml}
+      getVersion: [
+        'createEditSession'
+        (callback) =>
+          callback null, @editSessions[filename].version
+      ]
 
-                     """
+      addClient: [
+        'createEditSession'
+        (callback) =>
+          @editSessions[filename].clients.push connection
+          callback()
+      ]
 
-    @editSessions[filename] ?=
-      version: 0
-      dones: []
-      clients: []
-    @editSessions[filename].clients.push connection
+      joinOk: [
+        'getSpreadsheetXml', 'getVersion'
+        (callback, results) ->
+          connection.sendMessage(
+            """
+            JOIN OK
+            Name:#{filename}
+            Version:#{results.getVersion}
+            Length:#{results.getSpreadsheetXml.length}
+            #{results.getSpreadsheetXml}
+
+            """
+          )
+          callback()
+      ]
+
+      (error) ->
+        switch
+          when not error? then return
+          else
+            connection.sendMessage(
+              """
+              JOIN FAIL
+              Name:#{filename}
+              #{error.message}
+
+              """
+            )
+    )
 
   change: (connection, filename, version, cell, contents) ->
-    if checkName(conneciton, filename) is no
-      connection.write """
-                       CHANGE FAIL
-                       Name:#{filename}
-                       You are not connected to that spreadsheet.
+    async.auto(
+      checkName: [
+        (callback) =>
+          callback @checkName(connection, filename)
+      ]
 
-                       """
-      return
+      checkVersion: [
+        'checkName'
+        (callback) =>
+          callback @checkVersion(version, filename)
+      ]
 
-    if version isnt @getVersion filename
-      connection.write """
-                       CHANGE WAIT
-                       Name:#{filename}
-                       Version:#{@editSessions[filename].version}
+      changeCell: [
+        'checkVersion'
+        (callback) =>
+          @spreadsheetDatabase.changeCell filename, cell, contents, (done) ->
+            callback null, done
+      ]
 
-                       """
-      return
+      pushDone: [
+        'changeCell'
+        (callback, results) =>
+          @editSessions[filename].dones.push results.changeCell
+          callback()
+      ]
 
-    @spreadsheetDatabase.changeCell filename, contents, (done) =>
-      @editSessions[filename].dones.push done
+      incrementVersion: [
+        'checkVersion'
+        (callback) =>
+          callback null, ++@editSessions[filename].version
+      ]
 
-    connection.write """
-                     CHANGE OK
-                     Name:#{filename}
-                     Version:#{version = ++@editSessions[filename].version}
+      changeOk: [
+        'incrementVersion'
+        (callback, results) ->
+          connection.sendMessage(
+            """
+            CHANGE OK
+            Name:#{filename}
+            Version:#{results.incrementVersion}
 
-                     """
+            """
+          )
+          callback()
+      ]
 
-    updateMessage = """
-                    UPDATE
-                    Name:#{filename}
-                    Version:#{version}
-                    Cell:#{cell}
-                    Length:#{length}
-                    #{contents}
+      update: [
+        'incrementVersion'
+        (callback, results) =>
+          @update(
+            connection, filename, results.incrementVersion, cell, contents
+            ->
+              callback()
+          )
+      ]
 
-                    """
-    peer.write(updateMessage) for peer in @editSessions[filename].clients \
-        when peer isnt connection
+      (error) ->
+        switch
+          when not error? then return
+          when error.code is 'FAIL'
+            connection.sendMessage(
+              """
+              CHANGE FAIL
+              Name:#{filename}
+              #{error.message}
 
-    undo: (connection, filename, version) ->
+              """
+            )
+          else
+            connection.sendMessage(
+              """
+              CHANGE WAIT
+              Name:#{filename}
+              Version:#{error.version}
 
+              """
+            )
+    )
+
+  undo: (connection, filename, version) ->
+    async.auto(
+      checkName: [
+        (callback) =>
+          callback @checkName(connection, filename)
+      ]
+
+      checkVersion: [
+        'checkName'
+        (callback) =>
+          callback @checkVersion(version, filename)
+      ]
+
+      popDone: [
+        'checkVersion'
+        (callback) =>
+          done = @editSessions[filename].dones.pop()
+          if not done?
+            error =
+              code: 'END'
+              version: @editSessions[filename].version
+          callback error, done
+      ]
+
+      changeCell: [
+        'popDone'
+        (callback, results) =>
+          @spreadsheetDatabase.changeCell(
+            filename, results.popDone.cell, results.popDone.oldContents, ->
+              callback
+          )
+      ]
+
+      incrementVersion: [
+        'popDone'
+        (callback) =>
+          callback null, ++@editSessions[filename].version
+      ]
+
+      undoOk: [
+        'incrementVersion'
+        (callback, results) ->
+          connection.sendMessage(
+            """
+            UNDO OK
+            Name:#{filename}
+            Version:#{results.incrementVersion}
+            Cell:#{results.popDone.cell}
+            Length:#{results.popDone.oldContents.length}
+            #{results.popDone.oldContents}
+
+            """
+          )
+          callback()
+      ]
+
+      update: [
+        'incrementVersion'
+        (callback, results) =>
+          @update(
+            connection, filename, results.incrementVersion
+            results.popDone.cell, results.popDone.oldContents
+            ->
+              callback()
+          )
+      ]
+
+      (error) ->
+        switch
+          when not error? then return
+          when error.code is 'FAIL'
+            connection.sendMessage(
+              """
+              UNDO FAIL
+              Name:#{filename}
+              #{error.message}
+
+              """
+            )
+          when error.code is 'WAIT'
+            connection.sendMessage(
+              """
+              UNDO WAIT
+              Name:#{filename}
+              Version:#{error.version}
+
+              """
+            )
+          else
+            connection.sendMessage(
+              """
+              UNDO END
+              Name:#{filename}
+              Version:#{error.version}
+
+              """
+            )
+    )
+
+  save: (connection, filename) ->
+    async.auto(
+      checkName: [
+        (callback) =>
+          callback @checkName(connection, filename)
+      ]
+
+      saveOk: [
+        (callback) ->
+          connection.sendMessage(
+            """
+            SAVE OK
+            Name:#{filename}
+
+            """
+          )
+      ]
+
+      (error) ->
+        switch
+          when not error? then return
+          else
+            connection.sendMessage(
+              """
+              SAVE FAIL
+              Name:#{filename}
+              #{error.message}
+
+              """
+            )
+    )
+
+  leave: (connection, filename) ->
+    @editSessions[filename].clients.splice(
+      @editSessions[filename].clients.indexOf(connection), 1
+    )
+    if @editSessions[filename].clients.length is 0
+      @editSessions.splice @editSessions.indexOf(filename), 1
+
+  checkName: (connection, filename) ->
+    if @editSessions[filename].clients.indexOf(connection) is -1
+      error =
+        code: 'FAIL'
+        message: 'You are not connected to that spreadsheet.' 
+    return error
+
+  checkVersion: (version, filename) ->
+    correctVersion = @editSessions[filename].version
+    console.log "Version: #{version}"
+    console.log "Correct Version: #{correctVersion}"
+    console.log version is correctVersion.toString()
+    if version isnt correctVersion.toString()
+      error =
+        code: 'WAIT'
+        version: correctVersion
+    return error
+
+  update: (connection, filename, version, cell, contents, callback) ->
+    updateMessage =
+      """
+      UPDATE
+      Name:#{filename}
+      Version:#{version}
+      Cell:#{cell}
+      Length:#{contents.length}
+      #{contents}
+
+      """
+    async.each(
+      @editSessions[filename].clients
+      (peer, callback) ->
+        return if peer is connection
+        peer.sendMessage(updateMessage)
+        callback()
+      (error) ->
+        callback()
+    )
 
 module.exports = SpreadsheetServer

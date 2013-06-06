@@ -83,7 +83,7 @@ SpreadsheetDatabase = (function() {
         result += '<cell>';
         result += "<name>" + row.name + "</name>";
         result += "<contents>" + row.contents + "</contents>";
-        result += '<cell>';
+        result += '</cell>';
         return callback();
       }, function() {
         result += '</spreadsheet>';
@@ -97,30 +97,38 @@ SpreadsheetDatabase = (function() {
 
     cell = cell.toUpperCase();
     return async.auto({
-      id: function(callback) {
-        return _this.getSpreadsheetId(filename, function(id) {
-          return callback(null, id);
-        });
-      },
-      oldContents: function(callback, results) {
-        return _this.connection.query('SELECT contents FROM Cells WHERE id = ? AND name = ?', [results.id, cell], function(error, rows) {
-          return callback(null, rows[0] != null ? rows[0].contents : '');
-        });
-      },
-      deleteOldCell: function(callback, results) {
-        return _this.connection.query('DELETE FROM Cells WHERE id = ? AND name = ?', [results.id, cell], function() {
-          return callback();
-        });
-      },
-      insertNewCell: function(callback, results) {
-        if (contents.length < 0) {
-          callback();
-          return;
+      id: [
+        function(callback) {
+          return _this.getSpreadsheetId(filename, function(id) {
+            return callback(null, id);
+          });
         }
-        return _this.connection.query('INSERT INTO Cells (id, name, contents) VALUES (?, ?, ?)', [results.id, cell, contents], function() {
-          return callback();
-        });
-      }
+      ],
+      oldContents: [
+        'id', function(callback, results) {
+          return _this.connection.query('SELECT contents FROM Cells WHERE id = ? AND name = ?', [results.id, cell], function(error, rows) {
+            return callback(null, rows[0] != null ? rows[0].contents : '');
+          });
+        }
+      ],
+      deleteOldCell: [
+        'oldContents', function(callback, results) {
+          return _this.connection.query('DELETE FROM Cells WHERE id = ? AND name = ?', [results.id, cell], function() {
+            return callback();
+          });
+        }
+      ],
+      insertNewCell: [
+        'deleteOldCell', function(callback, results) {
+          if (contents.length < 0) {
+            callback();
+            return;
+          }
+          return _this.connection.query('INSERT INTO Cells (id, name, contents) VALUES (?, ?, ?)', [results.id, cell, contents], function() {
+            return callback();
+          });
+        }
+      ]
     }, function(error, results) {
       return callback({
         cell: cell,

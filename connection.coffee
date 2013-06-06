@@ -10,6 +10,9 @@ class Connection extends events.EventEmitter
     @socket.on 'data', (data) =>
       @buffer += String data
       @emit 'data'
+    @socket.on 'error', (error) ->
+      if error?
+        console.log error
     console.log 'Connection created'
   
   start: ->

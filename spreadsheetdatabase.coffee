@@ -70,7 +70,7 @@ class SpreadsheetDatabase
             result += '<cell>'
             result += "<name>#{row.name}</name>"
             result += "<contents>#{row.contents}</contents>"
-            result += '<cell>'
+            result += '</cell>'
             callback()
           ->
             result += '</spreadsheet>'
@@ -81,26 +81,35 @@ class SpreadsheetDatabase
   changeCell: (filename, cell, contents, callback) ->
     cell = cell.toUpperCase()
     async.auto(
-      id: (callback) => @getSpreadsheetId filename, (id) -> callback null, id
-      oldContents: (callback, results) =>
-        @connection.query(
-          'SELECT contents FROM Cells WHERE id = ? AND name = ?'
-          [results.id, cell], (error, rows) ->
-            callback null, if rows[0]? then rows[0].contents else ''
-        )
-      deleteOldCell: (callback, results) =>
-        @connection.query(
-          'DELETE FROM Cells WHERE id = ? AND name = ?', [results.id, cell]
-          -> callback()
-        )
-      insertNewCell: (callback, results) =>
-        if contents.length < 0
-          callback()
-          return
-        @connection.query(
-          'INSERT INTO Cells (id, name, contents) VALUES (?, ?, ?)'
-          [results.id, cell, contents], -> callback()
-        )
+      id: [(callback) => @getSpreadsheetId filename, (id) -> callback null, id]
+      oldContents: [
+        'id'
+        (callback, results) =>
+          @connection.query(
+            'SELECT contents FROM Cells WHERE id = ? AND name = ?'
+            [results.id, cell], (error, rows) ->
+              callback null, if rows[0]? then rows[0].contents else ''
+          )
+      ]
+      deleteOldCell: [
+        'oldContents'
+        (callback, results) =>
+          @connection.query(
+            'DELETE FROM Cells WHERE id = ? AND name = ?', [results.id, cell]
+            -> callback()
+          )
+      ]
+      insertNewCell: [
+        'deleteOldCell'
+        (callback, results) =>
+          if contents.length < 0
+            callback()
+            return
+          @connection.query(
+            'INSERT INTO Cells (id, name, contents) VALUES (?, ?, ?)'
+            [results.id, cell, contents], -> callback()
+          )
+      ]
       (error, results) ->
         callback(
           cell: cell

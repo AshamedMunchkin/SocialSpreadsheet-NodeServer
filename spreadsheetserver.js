@@ -298,6 +298,7 @@ SpreadsheetServer = (function() {
 
   SpreadsheetServer.prototype.leave = function(connection, filename) {
     this.editSessions[filename].clients.splice(this.editSessions[filename].clients.indexOf(connection), 1);
+    connection.socket.end();
     if (this.editSessions[filename].clients.length === 0) {
       return this.editSessions.splice(this.editSessions.indexOf(filename), 1);
     }
